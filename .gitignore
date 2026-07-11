@@ -1,0 +1,6 @@
+.venv/
+training/dataset/
+training/runs/
+__pycache__/
+*.pt
+!models/*.pt
