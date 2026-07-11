@@ -1,3 +1,5 @@
+from pathlib import Path
+
 # ── Robot config ──────────────────────────────────────────────────────────────
 ROBOT_IP        = "100.82.122.19"
 ROSBRIDGE_PORT  = 9090
@@ -10,6 +12,11 @@ CAMERA_URL = (f"http://{ROBOT_IP}:{WEB_VIDEO_PORT}/stream"
 
 MAX_LINEAR  = 0.50   # m/s
 MAX_ANGULAR = 1.50   # rad/s
+
+# ── Detection ─────────────────────────────────────────────────────────────────
+# Anchored on this file's location so it works from any working directory
+MODEL_PATH  = Path(__file__).resolve().parent.parent / "models" / "cans_v1.pt"
+DETECT_CONF = 0.5    # minimum confidence for a box to be shown
 
 SERVO_IDS      = [1, 2, 3, 4, 5, 10]
 SERVO_DEFAULTS = {1: 500, 2: 750, 3: 0, 4: 375, 5: 500, 10: 500}

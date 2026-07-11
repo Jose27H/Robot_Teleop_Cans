@@ -4,3 +4,6 @@ training/runs/
 __pycache__/
 *.pt
 !models/*.pt
+runs/
+yolo11n.pt
+bus.jpg

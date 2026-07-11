@@ -14,12 +14,13 @@ import tkinter as tk
 
 from config import (ROBOT_IP, ROSBRIDGE_PORT, CMD_VEL_TOPIC, SERVO_TOPIC,
                     CAMERA_URL, MAX_LINEAR, MAX_ANGULAR,
+                    MODEL_PATH, DETECT_CONF,
                     SERVO_IDS, SERVO_DEFAULTS, SERVO_NAMES,
                     BG, PANEL, ACCENT, ACCENT2, TEXT, GREEN, BLUE, ORANGE,
                     RED, PURPLE, PURPLE2)
 
 try:
-    from PIL import Image, ImageTk
+    from PIL import Image, ImageDraw, ImageTk
     PIL_AVAILABLE = True
 except ImportError:
     PIL_AVAILABLE = False
@@ -32,6 +33,12 @@ except ImportError:
 
 if PIL_AVAILABLE:
     from camera import MjpegCamera
+
+try:
+    from detector import Detector
+    DETECTOR_AVAILABLE = True
+except ImportError:
+    DETECTOR_AVAILABLE = False
 
 CAM_VIEW_SIZE = (640, 360)   # display size; frames arrive full-res
 
@@ -127,6 +134,12 @@ class TeleopApp:
 
         self._build_ui()
         self._connect_async()
+
+        self.detector = None
+        if DETECTOR_AVAILABLE and MODEL_PATH.exists():
+            self.detector = Detector(MODEL_PATH, conf=DETECT_CONF)
+        else:
+            print(f"[detector] no model at {MODEL_PATH} — running without detection")
 
         self.camera = None
         if PIL_AVAILABLE:
@@ -312,7 +325,17 @@ class TeleopApp:
         if not self._running:
             return
         resized = img.resize(CAM_VIEW_SIZE, Image.LANCZOS)
+        if self.detector:
+            self._draw_detections(resized, self.detector.detect(resized))
         self.root.after(0, self._show_frame, resized)
+
+    @staticmethod
+    def _draw_detections(img, detections):
+        draw = ImageDraw.Draw(img)
+        for label, conf, (x1, y1, x2, y2) in detections:
+            draw.rectangle((x1, y1, x2, y2), outline=GREEN, width=2)
+            ty = y1 - 13 if y1 >= 13 else y1 + 2   # keep text inside the frame
+            draw.text((x1 + 2, ty), f"{label} {conf:.0%}", fill=GREEN)
 
     def _show_frame(self, pil_img):
         photo = ImageTk.PhotoImage(pil_img)
