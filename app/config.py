@@ -19,7 +19,7 @@ MODEL_PATH  = Path(__file__).resolve().parent.parent / "models" / "cans_v1.pt"
 DETECT_CONF = 0.5    # minimum confidence for a box to be shown
 
 SERVO_IDS      = [1, 2, 3, 4, 5, 10]
-SERVO_DEFAULTS = {1: 500, 2: 750, 3: 0, 4: 375, 5: 500, 10: 500}
+SERVO_DEFAULTS = {1: 500, 2: 750, 3: 0, 4: 210, 5: 500, 10: 500}
 SERVO_NAMES    = {
     1:  "#1 Base Rotate",
     2:  "#2 Shoulder",
