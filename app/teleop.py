@@ -8,9 +8,15 @@ Requires: pip install websocket-client Pillow
 """
 
 import math
+import os
+import sys
 import threading
 import time
 import tkinter as tk
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+os.environ.setdefault("XDG_CONFIG_HOME", str(PROJECT_ROOT / ".config"))
 
 from config import (ROBOT_IP, ROSBRIDGE_PORT, CMD_VEL_TOPIC, SERVO_TOPIC,
                     CAMERA_URL, MAX_LINEAR, MAX_ANGULAR,
@@ -37,8 +43,16 @@ if PIL_AVAILABLE:
 try:
     from detector import Detector
     DETECTOR_AVAILABLE = True
-except ImportError:
+except Exception as exc:  # pragma: no cover - depends on environment
     DETECTOR_AVAILABLE = False
+    print(f"[detector] unavailable: {exc}")
+
+try:
+    from follow import FollowController
+    FOLLOW_AVAILABLE = True
+except Exception as exc:
+    FOLLOW_AVAILABLE = False
+    print(f"[follow] unavailable: {exc}")
 
 CAM_VIEW_SIZE = (640, 360)   # display size; frames arrive full-res
 
@@ -132,12 +146,22 @@ class TeleopApp:
         self.servo_vals = dict(SERVO_DEFAULTS)
         self._running = True
 
+        # Follow-can state (isolated: only read in _publish_loop when active)
+        self.follow = (FollowController(MAX_LINEAR, MAX_ANGULAR)
+                       if FOLLOW_AVAILABLE else None)
+        self.follow_active = False
+        self._latest_detections = []
+        self._latest_det_time = 0.0
+
         self._build_ui()
         self._connect_async()
 
         self.detector = None
         if DETECTOR_AVAILABLE and MODEL_PATH.exists():
-            self.detector = Detector(MODEL_PATH, conf=DETECT_CONF)
+            try:
+                self.detector = Detector(MODEL_PATH, conf=DETECT_CONF)
+            except Exception as exc:
+                print(f"[detector] could not initialize: {exc}")
         else:
             print(f"[detector] no model at {MODEL_PATH} — running without detection")
 
@@ -148,6 +172,7 @@ class TeleopApp:
 
         self._publish_loop()
         self.root.protocol("WM_DELETE_WINDOW", self._quit)
+        self.root.update_idletasks()
 
     # ── UI construction ───────────────────────────────────────────────────────
     def _build_ui(self):
@@ -164,13 +189,16 @@ class TeleopApp:
         content = tk.Frame(self.root, bg=BG)
         content.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
 
-        left  = tk.Frame(content, bg=BG)
-        left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        top = tk.Frame(content, bg=BG)
+        top.pack(fill=tk.BOTH, expand=True)
 
-        right = tk.LabelFrame(content, text=" Servo Control ",
-                               font=("Helvetica", 10, "bold"), fg=TEXT, bg=PANEL,
-                               bd=2, relief=tk.GROOVE)
-        right.pack(side=tk.RIGHT, fill=tk.Y, padx=(8, 0))
+        left = tk.Frame(top, bg=BG)
+        left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 8))
+
+        right = tk.LabelFrame(top, text=" Servo Control ",
+                              font=("Helvetica", 10, "bold"), fg=TEXT, bg=PANEL,
+                              bd=2, relief=tk.GROOVE)
+        right.pack(side=tk.RIGHT, fill=tk.Y)
 
         # ── Camera ────────────────────────────────────────────────────────────
         cam_f = tk.LabelFrame(left, text=" Live Camera ",
@@ -233,6 +261,16 @@ class TeleopApp:
                   activebackground="#ee3333", cursor="hand2",
                   command=self._stop_all).pack(padx=10, pady=6)
 
+        self.follow_btn = tk.Button(
+            ts_f, text="🎯  Follow Can", font=("Helvetica", 11, "bold"),
+            width=12, height=2, bg=ACCENT, fg=TEXT,
+            activebackground=ACCENT2, cursor="hand2",
+            command=self._toggle_follow)
+        self.follow_btn.pack(padx=10, pady=(0, 4))
+        self.follow_lbl = tk.Label(ts_f, text="", fg=ORANGE, bg=PANEL,
+                                    font=("Helvetica", 8))
+        self.follow_lbl.pack(pady=(0, 4))
+
         # Key hints
         hints = tk.Frame(ts_f, bg=PANEL)
         hints.pack(padx=6, pady=(0, 8))
@@ -294,8 +332,8 @@ class TeleopApp:
         # ── Keyboard bindings ─────────────────────────────────────────────────
         self.root.bind("<KeyPress-w>",     lambda e: self._key_move( MAX_LINEAR, 0, 0))
         self.root.bind("<KeyPress-s>",     lambda e: self._key_move(-MAX_LINEAR, 0, 0))
-        self.root.bind("<KeyPress-a>",     lambda e: self._key_move(0, -MAX_LINEAR, 0))
-        self.root.bind("<KeyPress-d>",     lambda e: self._key_move(0,  MAX_LINEAR, 0))
+        self.root.bind("<KeyPress-a>",     lambda e: self._key_move(0, MAX_LINEAR, 0))
+        self.root.bind("<KeyPress-d>",     lambda e: self._key_move(0,  -MAX_LINEAR, 0))
         self.root.bind("<KeyPress-q>",     lambda e: self._key_move(0, 0,  MAX_ANGULAR))
         self.root.bind("<KeyPress-e>",     lambda e: self._key_move(0, 0, -MAX_ANGULAR))
         self.root.bind("<KeyRelease-w>",   lambda e: self._key_stop_fwd())
@@ -326,16 +364,23 @@ class TeleopApp:
             return
         resized = img.resize(CAM_VIEW_SIZE, Image.LANCZOS)
         if self.detector:
-            self._draw_detections(resized, self.detector.detect(resized))
+            detections = self.detector.detect(resized)
+            self._latest_detections = detections
+            self._latest_det_time = time.monotonic()
+            self._draw_detections(resized, detections)
         self.root.after(0, self._show_frame, resized)
 
-    @staticmethod
-    def _draw_detections(img, detections):
+    def _draw_detections(self, img, detections):
         draw = ImageDraw.Draw(img)
-        for label, conf, (x1, y1, x2, y2) in detections:
-            draw.rectangle((x1, y1, x2, y2), outline=GREEN, width=2)
+        target = (self.follow.pick_target(detections)
+                  if self.follow_active and self.follow else None)
+        for det in detections:
+            label, conf, (x1, y1, x2, y2) = det
+            color = ORANGE if det is target else GREEN
+            draw.rectangle((x1, y1, x2, y2), outline=color, width=2)
             ty = y1 - 13 if y1 >= 13 else y1 + 2   # keep text inside the frame
-            draw.text((x1 + 2, ty), f"{label} {conf:.0%}", fill=GREEN)
+            tag = "TRACKING " if det is target else ""
+            draw.text((x1 + 2, ty), f"{tag}{label} {conf:.0%}", fill=color)
 
     def _show_frame(self, pil_img):
         photo = ImageTk.PhotoImage(pil_img)
@@ -359,9 +404,42 @@ class TeleopApp:
     def _key_stop_lat(self): self.ly = 0.0
 
     def _stop_all(self):
+        if self.follow_active:
+            self._toggle_follow()
         self.lx = self.ly = self.az = 0.0
         self.joystick._draw()
         self.client.cmd_vel(0.0, 0.0, 0.0)
+
+    # ── Follow-can mode ───────────────────────────────────────────────────────
+    def _toggle_follow(self):
+        if self.follow is None or self.detector is None:
+            self.follow_lbl.config(text="detector not available")
+            return
+        self.follow_active = not self.follow_active
+        if self.follow_active:
+            self.lx = self.ly = self.az = 0.0   # drop any manual command
+            self.follow_btn.config(bg=ORANGE, activebackground="#ee8822",
+                                   text="🎯  Following…")
+            self.follow_lbl.config(text="press STOP or Space to cancel")
+        else:
+            self.follow_btn.config(bg=ACCENT, activebackground=ACCENT2,
+                                   text="🎯  Follow Can")
+            self.follow_lbl.config(text="")
+            self.lx = self.ly = self.az = 0.0
+            self.client.cmd_vel(0.0, 0.0, 0.0)
+
+    def _follow_step(self):
+        """One 10 Hz follow update. Any failure disables follow and stops."""
+        try:
+            detections = self._latest_detections
+            if time.monotonic() - self._latest_det_time > 1.0:
+                detections = []   # camera/detector stale → treat as can lost
+            lx, az, status = self.follow.update(detections, CAM_VIEW_SIZE)
+            self.lx, self.ly, self.az = lx, 0.0, az
+            self.follow_lbl.config(text=status)
+        except Exception as exc:
+            print(f"[follow] error, disabling: {exc}")
+            self._toggle_follow()
 
     def _servo_cb(self, sid, val):
         self.servo_vals[sid] = val
@@ -405,6 +483,8 @@ class TeleopApp:
     # ── 10 Hz publish loop ────────────────────────────────────────────────────
     def _publish_loop(self):
         if self._running:
+            if self.follow_active:
+                self._follow_step()
             self.client.cmd_vel(self.lx, self.ly, self.az)
             self._draw_speed()
             self.root.after(100, self._publish_loop)
@@ -422,6 +502,8 @@ class TeleopApp:
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 def main():
+    os.environ.setdefault("TK_SILENCE_DEPRECATION", "1")
+
     missing = []
     if not WS_AVAILABLE:
         missing.append("websocket-client")
@@ -433,10 +515,35 @@ def main():
             print("  websocket-client is required to connect to the robot.")
             return
 
-    root = tk.Tk()
-    root.resizable(True, True)
-    TeleopApp(root)
-    root.mainloop()
+    try:
+        root = tk.Tk()
+        root.title("JetAuto Teleop")
+        root.resizable(True, True)
+        root.minsize(1100, 700)
+        root.geometry("1360x860")
+
+        try:
+            root.update_idletasks()
+            sw = root.winfo_screenwidth()
+            sh = root.winfo_screenheight()
+            w = 1360
+            h = 860
+            x = max(0, (sw - w) // 2)
+            y = max(0, (sh - h) // 2)
+            root.geometry(f"{w}x{h}+{x}+{y}")
+            root.lift()
+            root.attributes("-topmost", True)
+            root.after(150, lambda: root.attributes("-topmost", False))
+            root.after(150, root.focus_force)
+        except Exception:
+            pass
+
+        TeleopApp(root)
+        print("[startup] opening GUI window")
+        root.mainloop()
+    except Exception as exc:
+        print(f"[startup] GUI failed to start: {exc}", file=sys.stderr)
+        raise
 
 
 if __name__ == "__main__":

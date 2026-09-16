@@ -6,11 +6,29 @@ so no ultralytics types leak into the rest of the app. Knows nothing about
 tkinter, cameras, or config.
 """
 
-from ultralytics import YOLO
+import os
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+CONFIG_DIR = PROJECT_ROOT / ".config" / "ultralytics"
+CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+os.environ.setdefault("XDG_CONFIG_HOME", str(PROJECT_ROOT / ".config"))
+os.environ.setdefault("ULTRALYTICS_SETTINGS_DIR", str(CONFIG_DIR))
+
+try:
+    from ultralytics import YOLO
+    YOLO_AVAILABLE = True
+    YOLO_IMPORT_ERROR = None
+except Exception as exc:  # pragma: no cover - depends on environment
+    YOLO_AVAILABLE = False
+    YOLO_IMPORT_ERROR = exc
+    YOLO = None
 
 
 class Detector:
     def __init__(self, model_path, conf=0.5):
+        if not YOLO_AVAILABLE:
+            raise RuntimeError(f"Ultralytics is unavailable: {YOLO_IMPORT_ERROR}")
         self.model = YOLO(model_path)
         self.conf = conf
 
